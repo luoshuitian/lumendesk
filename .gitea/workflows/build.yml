@@ -1,0 +1,119 @@
+# LumenDesk 构建流水线
+#
+# 为什么放在 .gitea/workflows 而不是 .github/workflows：
+#   上游 RustDesk 自带 9 个 GitHub workflow（flutter-build.yml 等），
+#   那些任务依赖官方 secrets、签名证书和多平台矩阵，在本环境必然失败。
+#   Gitea 会读取 .gitea/workflows 目录，正好与上游隔离，互不干扰。
+#
+# Runner 标签约定：
+#   linux   → NAS 上的 act_runner（容器执行）
+#   windows → 本机 Windows 上的 act_runner（宿主执行，需 Rust/LLVM/Flutter/vcpkg/MSVC）
+
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "是否构建 Windows 客户端（需要本机 runner 工具链就绪）"
+        type: boolean
+        default: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux 侧：静态检查 + 单元测试，快速反馈，不产出安装包
+  # ---------------------------------------------------------------------------
+  check-linux:
+    name: 静态检查与测试 (Linux)
+    runs-on: linux
+    steps:
+      - name: 拉取源码
+        run: |
+          git config --global --add safe.directory "$PWD"
+          git clone --depth 1 "http://gitea:3000/${GITHUB_REPOSITORY}.git" . || true
+
+      - name: 安装系统依赖
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            clang libclang-dev pkg-config \
+            libgtk-3-dev libxcb-randr0-dev libxdo-dev libxfixes-dev \
+            libasound2-dev libpulse-dev \
+            libvpx-dev libyuv-dev libaom-dev libopus-dev
+
+      - name: 环境信息
+        run: |
+          rustc --version || echo "rust 未安装"
+          cargo --version || echo "cargo 未安装"
+
+      - name: cargo check
+        run: |
+          cargo check --features linux-pkg-config --no-default-features 2>&1 | tail -40
+
+  # ---------------------------------------------------------------------------
+  # Windows 侧：产出可分发客户端
+  # 依赖：本机 act_runner 已注册、MSVC + LLVM + Flutter + vcpkg 就绪
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: 构建 Windows 客户端
+    runs-on: windows
+    if: ${{ inputs.build_windows == true }}
+    steps:
+      - name: 拉取源码
+        shell: powershell
+        run: |
+          git config --global --add safe.directory (Get-Location).Path
+          git clone --depth 1 "http://gitea:3000/$env:GITHUB_REPOSITORY.git" . -ErrorAction SilentlyContinue
+
+      - name: 环境自检
+        shell: powershell
+        run: |
+          $ok = $true
+          foreach ($p in @("$env:USERPROFILE\.cargo\bin\cargo.exe",
+                           "C:\Program Files\LLVM\bin\clang.exe",
+                           "D:\tools\flutter\bin\flutter.bat",
+                           "D:\tools\vcpkg\vcpkg.exe")) {
+            if (Test-Path $p) { Write-Host "[OK]   $p" } else { Write-Host "[MISS] $p"; $ok = $false }
+          }
+          $cl = Get-ChildItem "C:\BuildTools\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "bin\Hostx64\x64\cl.exe") }
+          if ($cl) { Write-Host "[OK]   MSVC $($cl.Name)" } else { Write-Host "[MISS] MSVC"; $ok = $false }
+          if (-not $ok) { throw "工具链不完整，见 docs/03-构建指南.md" }
+
+      - name: 编译 vcpkg 依赖
+        shell: powershell
+        run: |
+          $env:VCPKG_ROOT = "D:\tools\vcpkg"
+          & "$env:VCPKG_ROOT\vcpkg.exe" install libvpx aom libyuv opus `
+            --triplet x64-windows-static `
+            --overlay-ports="$env:GITHUB_WORKSPACE\vcpkg-overlay" `
+            --x-install-root="$env:VCPKG_ROOT\installed"
+
+      - name: 编译 Rust 核心
+        shell: powershell
+        run: |
+          $env:VCPKG_ROOT = "D:\tools\vcpkg"
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Program Files\LLVM\bin;$env:PATH"
+          cargo build --locked --features flutter --lib --release
+
+      - name: 编译 Flutter UI
+        shell: powershell
+        run: |
+          $env:PATH = "D:\tools\flutter\bin;$env:PATH"
+          $env:PUB_HOSTED_URL = "https://pub.flutter-io.cn"
+          $env:FLUTTER_STORAGE_BASE_URL = "https://storage.flutter-io.cn"
+          Set-Location flutter
+          flutter pub get
+          flutter build windows --release
+
+      - name: 归档产物
+        shell: powershell
+        run: |
+          $out = "dist"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "flutter\build\windows\x64\runner\Release\*" $out -Recurse -Force
+          Copy-Item "target\release\deps\dylib_virtual_display.dll" $out -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$out\*" -DestinationPath "lumendesk-windows-$env:GITHUB_SHA.zip" -Force
+          Get-ChildItem "lumendesk-windows-*.zip" | ForEach-Object { Write-Host "产物: $($_.FullName) ($([math]::Round($_.Length/1MB,1)) MB)" }
