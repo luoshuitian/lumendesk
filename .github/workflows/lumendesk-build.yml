@@ -69,17 +69,16 @@ jobs:
           channel: stable
           cache: true
 
-      # 只缓存 crate 源码（体积小、命中率高）。
-      # target 目录动辄 GB 级，实测这种体量的条目必然保存失败（服务端返回 5xx），
-      # 随后恢复端拿到半成品条目又返回 400；宁可每次重编 Rust，也不让缓存链路报错。
-      - name: 缓存 cargo 依赖
-        uses: actions/cache@v5
+      # 缓存的硬约束：单仓库 Actions 缓存配额只有 10 GB。
+      # 实测此前多份大条目叠加到 9.67 GB，配额打满后保存失败，
+      # 恢复时拿到被驱逐的条目又返回 400——这才是缓存告警的真正成因。
+      # 现在只保留一份 rust-cache（约 2-3 GB），加上 vcpkg installed（约 0.15 GB）
+      # 与 Flutter（约 1.15 GB），总占用约 4 GB，留足余量。
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-deps-v4-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-deps-v4-
+          prefix-key: v4-rust
+          key: x64-windows-static
 
       - name: 安装绑定生成工具
         shell: pwsh
