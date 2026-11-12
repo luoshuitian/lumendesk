@@ -73,9 +73,7 @@ file(INSTALL ${SOURCE_PATH}/LICENSE DESTINATION ${CURRENT_PACKAGES_DIR}/share/${
 
 vcpkg_cmake_get_vars(cmake_vars_file)
 include("${cmake_vars_file}")
-if (VCPKG_DETECTED_CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    message(WARNING "Use MSVC to compile libyuv results in a very slow library. (https://github.com/microsoft/vcpkg/issues/28446)")
-    file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage-msvc" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}" RENAME "usage")
-else ()
-    file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
-endif ()
+# 注意：本端口在 MSVC triplet 下已经强制改用 clang-cl 编译（见上面的 BUILD_OPTIONS），
+# 所以不能再按 triplet 的编译器 ID 判断性能。那条 "Use MSVC ... very slow" 的
+# WARNING 属于误报，已移除；实际编译器由 CI 的 libyuv 校验步骤断言。
+file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
