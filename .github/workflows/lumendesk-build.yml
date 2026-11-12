@@ -95,31 +95,37 @@ jobs:
           Pop-Location
           if ($code -ne 0) { throw "flutter pub get 失败" }
 
-      - name: 缓存 vcpkg 已编译依赖
+      # 不再使用 Actions 缓存服务：实测在长作业里它对建仓的请求会返回 400/503，
+      # 且各项隔离测试（键、路径、体积、单个/多个 action、x-gha 组合）全部正常，
+      # 属服务端行为，配置层无法规避。改为把依赖包放在 Release 附件（对象存储），
+      # 走 gh CLI 直接下载/上传，同样能省掉重复编译，且不会产生任何缓存告警。
+      - name: 尝试获取已编译依赖
         id: vcpkg-cache
-        uses: actions/cache@v5
-        with:
-          # 缓存的是"单个 zip 文件"而不是目录树：目录树几千个小文件，
-          # 打包耗时且容易在缓存服务上失败；单文件更稳、体积也更小
-          path: C:\vcpkg\installed.zip
-          key: vcpkg-zip-v1-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
-          restore-keys: vcpkg-zip-v1-
-
-      - name: 展开缓存的依赖
-        if: steps.vcpkg-cache.outputs.cache-hit == 'true'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if (-not (Test-Path "C:\vcpkg\installed.zip")) { throw "缓存命中但文件缺失" }
-          Expand-Archive -Path "C:\vcpkg\installed.zip" -DestinationPath "C:\vcpkg" -Force
-          Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" |
-            Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
-            Format-Table -AutoSize
+          $hit = "false"
+          try {
+            gh release download vcpkg-deps --pattern installed.zip --dir C:\vcpkg --clobber 2>$null
+            if (Test-Path "C:\vcpkg\installed.zip") { $hit = "true" }
+          } catch {
+            Write-Host "没有可用的依赖包，将重新编译"
+          }
+          if ($hit -eq "true") {
+            Expand-Archive -Path "C:\vcpkg\installed.zip" -DestinationPath "C:\vcpkg" -Force
+            Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" |
+              Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
+              Format-Table -AutoSize
+          }
+          "hit=$hit" >> $env:GITHUB_OUTPUT
 
       - name: 编译原生依赖
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg-cache.outputs.hit != 'true'
         shell: pwsh
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # classic 模式：切到 vcpkg 目录执行，绕开 manifest 模式不接受包名的限制
           Push-Location "C:\vcpkg"
@@ -162,10 +168,18 @@ jobs:
             }
           }
 
-          # 打成单文件，供 actions/cache 在作业结束时保存
+          # 打成单文件，上传到 Release vcpkg-deps，供后续运行直接复用
           Compress-Archive -Path "C:\vcpkg\installed" -DestinationPath "C:\vcpkg\installed.zip" -Force
           Get-Item "C:\vcpkg\installed.zip" |
-            ForEach-Object { Write-Host "缓存包大小: $([math]::Round($_.Length/1MB,1)) MB" }
+            ForEach-Object { Write-Host "依赖包大小: $([math]::Round($_.Length/1MB,1)) MB" }
+
+          gh release view vcpkg-deps 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create vcpkg-deps --title "vcpkg 预编译依赖" `
+              --notes "CI 自动生成并复用，请勿手动删除" --prerelease
+          }
+          gh release upload vcpkg-deps C:\vcpkg\installed.zip --clobber
+          Write-Host "已上传依赖包，下次运行可直接命中"
 
       - name: 校验 libyuv 使用 clang-cl 编译
         shell: pwsh
