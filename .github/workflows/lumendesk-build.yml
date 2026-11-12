@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: 拉取源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 准备 vcpkg（固定到清单声明的版本）
         uses: lukka/run-vcpkg@v11
@@ -69,15 +69,15 @@ jobs:
           channel: stable
           cache: true
 
-      - name: 缓存 cargo 构建产物
-        uses: actions/cache@v4
+      # target 目录动辄数 GB，整包塞进 actions/cache 会把上传时间拉到十几分钟，
+      # 容易撞上缓存服务的超时与容量限制。rust-cache 只保留必要产物，
+      # 并按依赖指纹分片，命中率更高、体积更小
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-v2-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-v2-
+          prefix-key: v3-rust
+          key: x64-windows-static
+          cache-on-failure: false
 
       - name: 安装绑定生成工具
         shell: pwsh
@@ -107,12 +107,13 @@ jobs:
 
       - name: 缓存 vcpkg 已编译依赖
         id: vcpkg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\buildtrees
-          key: vcpkg-v2-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
+          # 只缓存链接阶段真正用到的 installed。buildtrees 是几 GB 的中间产物，
+          # 之前把它一起打包，正是保存失败和后续恢复 400 的主因
+          path: C:\vcpkg\installed
+          key: vcpkg-v3-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
+          restore-keys: vcpkg-v3-
 
       - name: 编译原生依赖
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -143,6 +144,35 @@ jobs:
           Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" -ErrorAction SilentlyContinue |
             Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
             Format-Table -AutoSize
+
+          # 记录 libyuv 实际使用的编译器，供下一步断言。
+          # res/vcpkg/libyuv 端口在检测到 MSVC 时会强切 clang-cl（SIMD 优化只在 clang 下完整），
+          # 但它末尾的 WARNING 是按 triplet 的编译器 ID 判断的，属误报；
+          # 这里改成读构建日志里的真实识别结果，避免"以为用了 clang 其实没用到"
+          $cfg = Get-ChildItem "C:\vcpkg\buildtrees\libyuv" -Filter "config-*-rel-out.log" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($cfg) {
+            $line = Select-String -Path $cfg.FullName -Pattern "The C compiler identification is .+" |
+              Select-Object -First 1
+            if ($line) {
+              $stamp = "C:\vcpkg\installed\x64-windows-static\share\libyuv\compiler.txt"
+              New-Item -ItemType Directory -Force -Path (Split-Path $stamp) | Out-Null
+              Set-Content -Path $stamp -Value $line.Line.Trim() -Encoding utf8
+              Write-Host "libyuv 编译器: $($line.Line.Trim())"
+            }
+          }
+
+      - name: 校验 libyuv 使用 clang-cl 编译
+        shell: pwsh
+        run: |
+          $stamp = "C:\vcpkg\installed\x64-windows-static\share\libyuv\compiler.txt"
+          if (-not (Test-Path $stamp)) { throw "缺少 libyuv 编译器记录，无法确认编译方式" }
+          $line = (Get-Content $stamp -Raw).Trim()
+          Write-Host $line
+          if ($line -notmatch "Clang") {
+            throw "libyuv 不是 clang-cl 编译（$line），性能会明显下降，构建终止"
+          }
+          Write-Host "OK: libyuv 由 clang-cl 编译，SIMD 优化路径完整"
 
       - name: 生成 flutter_rust_bridge 绑定
         shell: pwsh
@@ -237,7 +267,7 @@ jobs:
           Get-ChildItem $out | Select-Object Name | Format-Table -AutoSize
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lumendesk-windows-${{ github.sha }}
           path: lumendesk-windows.zip
@@ -247,7 +277,7 @@ jobs:
       # 这样产物就能被自动取走并交付到本机
       - name: 发布到 Release
         if: success()
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: build-${{ github.run_number }}
           name: LumenDesk Windows 构建 #${{ github.run_number }}
