@@ -27,7 +27,12 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # 与 vcpkg.json 的 vcpkg-configuration.default-registry.baseline 保持一致
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  # 与上游 build-for-windows-flutter 任务一致（Cargo.lock 就是按该版本锁定的）
+  RUST_VERSION: "1.75"
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -48,8 +53,10 @@ jobs:
           doNotCache: false
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
+        # 与上游 CI 相同的固定版本（v1 的 SHA）
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: x86_64-pc-windows-msvc
 
       - name: 安装 Flutter 3.24.5
@@ -114,10 +121,16 @@ jobs:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          # 不用 --locked：Cargo.toml 已恢复上游的 git 依赖（portable-pty 走
-          # rustdesk-org/wezterm），锁文件里的 registry 记录需要据此重新解析
-          cargo build --features flutter --lib --release
-          if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+          rustc --version
+          cargo --version
+
+          # 不用 --locked：Cargo.toml 用上游的 git 依赖（portable-pty 走
+          # rustdesk-org/wezterm），锁文件里的 registry 记录需据此重新解析
+          cargo build --features flutter --lib --release 2>&1 |
+            Tee-Object -FilePath cargo-build.log
+          $code = $LASTEXITCODE
+
+          if ($code -ne 0) { throw "cargo build 失败（exit $code）" }
           if (-not (Test-Path "target\release\librustdesk.dll")) { throw "未生成 librustdesk.dll" }
           Get-Item "target\release\librustdesk.dll" |
             ForEach-Object { Write-Host "librustdesk.dll: $([math]::Round($_.Length/1MB,1)) MB" }
@@ -155,3 +168,49 @@ jobs:
           name: lumendesk-windows-${{ github.sha }}
           path: lumendesk-windows.zip
           retention-days: 30
+
+      # 失败时把关键日志写回 ci-logs 分支，便于不带登录态也能定位问题
+      - name: 失败时把日志写回仓库
+        if: failure()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $lines = @()
+          $lines += "# CI 失败日志"
+          $lines += ""
+          $lines += "- run: ${{ github.run_id }}"
+          $lines += "- sha: ${{ github.sha }}"
+          $lines += "- rust: ${{ env.RUST_VERSION }}"
+          $lines += ""
+          $lines += "## 编译器错误摘要"
+          $lines += '```'
+          if (Test-Path cargo-build.log) {
+            $lines += Get-Content cargo-build.log |
+              Select-String -Pattern "error\[E|^error:|could not compile|panicked at" |
+              Select-Object -First 60 | ForEach-Object { $_.Line }
+          } else {
+            $lines += "(无 cargo-build.log：失败发生在 Rust 编译之前)"
+          }
+          $lines += '```'
+          $lines += ""
+          $lines += "## cargo 输出尾部"
+          $lines += '```'
+          if (Test-Path cargo-build.log) { $lines += Get-Content cargo-build.log -Tail 300 }
+          $lines += '```'
+          $lines += ""
+          $lines += "## vcpkg 构建日志尾部"
+          $lines += '```'
+          Get-ChildItem "C:\vcpkg\buildtrees" -Recurse -Filter "*.log" -ErrorAction SilentlyContinue |
+            Select-Object -First 12 | ForEach-Object {
+              $lines += "===== $($_.Directory.Name)/$($_.Name) ====="
+              $lines += Get-Content $_.FullName -Tail 15
+            }
+          $lines += '```'
+          $lines -join "`n" | Set-Content ci-error.log -Encoding utf8
+
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@lumendesk.local"
+          git checkout -B ci-logs
+          git add -f ci-error.log
+          git commit -m "ci: failure log ${{ github.run_id }}"
+          git push -f origin ci-logs
