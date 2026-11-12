@@ -69,15 +69,17 @@ jobs:
           channel: stable
           cache: true
 
-      # target 目录动辄数 GB，整包塞进 actions/cache 会把上传时间拉到十几分钟，
-      # 容易撞上缓存服务的超时与容量限制。rust-cache 只保留必要产物，
-      # 并按依赖指纹分片，命中率更高、体积更小
-      - name: 缓存 Rust 构建产物
-        uses: Swatinem/rust-cache@v2
+      # 只缓存 crate 源码（体积小、命中率高）。
+      # target 目录动辄 GB 级，实测这种体量的条目必然保存失败（服务端返回 5xx），
+      # 随后恢复端拿到半成品条目又返回 400；宁可每次重编 Rust，也不让缓存链路报错。
+      - name: 缓存 cargo 依赖
+        uses: actions/cache@v5
         with:
-          prefix-key: v3-rust
-          key: x64-windows-static
-          cache-on-failure: false
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deps-v4-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-deps-v4-
 
       - name: 安装绑定生成工具
         shell: pwsh
