@@ -1,0 +1,60 @@
+name: Cache Quota Probe
+
+# 诊断：列出仓库所有 Actions 缓存条目与总占用，判断是否撞了 10 GB 配额。
+# 结果写到 ci-metrics 分支的 cache-report.md，便于无登录态读取。
+# 只在 probe3 分支触发。
+
+on:
+  push:
+    branches: [probe3]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  report:
+    name: 缓存配额报告
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 统计缓存
+        run: |
+          gh cache list --limit 100 --json key,sizeInBytes,createdAt,lastAccessedAt > /tmp/caches.json || echo '[]' > /tmp/caches.json
+          python3 - <<'PY' > /tmp/report.md
+          import json
+          data = json.load(open('/tmp/caches.json'))
+          total = sum(int(c.get('sizeInBytes') or 0) for c in data)
+          print(f"# 缓存配额报告\n")
+          print(f"- 条目数: {len(data)}")
+          print(f"- 总大小: {total/1024/1024/1024:.2f} GB")
+          print(f"- GitHub 免费配额: 10 GB\n")
+          print("| 键 | GB | 创建时间 |")
+          print("|---|---|---|")
+          for c in sorted(data, key=lambda x: -(int(x.get('sizeInBytes') or 0)))[:30]:
+              gb = int(c.get('sizeInBytes') or 0)/1024/1024/1024
+              print(f"| {c['key'][:70]} | {gb:.2f} | {c.get('createdAt','')[:10]} |")
+          PY
+          cat /tmp/report.md
+
+      - name: 清理全部缓存
+        run: |
+          gh cache delete --all || echo "delete failed"
+          echo "--- 清理后 ---"
+          gh cache list --limit 100 --json key,sizeInBytes | python3 -c "import sys,json;d=json.load(sys.stdin);print('剩余条目:',len(d))" || true
+
+      - name: 写回报告
+        run: |
+          mkdir -p docs
+          cp /tmp/report.md docs/cache-report.md
+          git config user.name "ci-bot"
+          git config user.email "ci@lumendesk.local"
+          git checkout -B ci-metrics
+          git add -f docs/cache-report.md
+          git commit -m "metrics: cache report ${{ github.run_id }}" || echo "no changes"
+          git push -f origin ci-metrics || echo "push failed"
