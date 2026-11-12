@@ -1,0 +1,123 @@
+name: Build Windows Client
+
+# 说明
+# ----
+# 本文件是 .gitea/workflows/build.yml 的 GitHub Actions 版本。
+# 与 Gitea 版的区别：
+#   1. runs-on 用 GitHub 托管的 windows-2022，自带 MSVC / Windows SDK / LLVM / vcpkg
+#   2. 依赖源码走 GitHub 内网，aom / libyuv / libvpx 能按 vcpkg.json 锁定的版本正常拉取
+#   3. 增加了 vcpkg 依赖的缓存，避免每次重新编译（首次约 40 分钟，命中缓存后约 15 分钟）
+#
+# 上游 RustDesk 自带的 11 个 workflow 已移至 .github/workflows/_upstream_disabled/，
+# GitHub 只扫描 workflows 顶层目录，因此不会被执行。
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: 构建 Windows 客户端
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: 拉取源码
+        uses: actions/checkout@v4
+
+      - name: 启用 GitHub Actions 缓存（供 vcpkg 二进制缓存使用）
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 安装 Flutter 3.24.5
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.24.5
+          channel: stable
+          cache: true
+
+      - name: 缓存 cargo 构建产物
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-
+
+      - name: 缓存 vcpkg 已编译依赖
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/buildtrees
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('vcpkg-overlay/**') }}
+
+      - name: 编译原生依赖
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # 只装 RustDesk 实际链接的 4 个库，跳过 ffmpeg（纯软件编码用不到）
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libvpx aom libyuv opus `
+            --triplet x64-windows-static `
+            --overlay-ports="$env:GITHUB_WORKSPACE\vcpkg-overlay" `
+            --x-install-root="$env:VCPKG_INSTALLATION_ROOT\installed"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install 失败" }
+
+      - name: 编译 Rust 核心
+        shell: pwsh
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+        run: |
+          cargo build --features flutter --lib --release
+          if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+          if (-not (Test-Path "target\release\librustdesk.dll")) { throw "未生成 librustdesk.dll" }
+
+      - name: 编译 Flutter UI
+        shell: pwsh
+        run: |
+          Set-Location flutter
+          flutter pub get
+          flutter build windows --release
+          if ($LASTEXITCODE -ne 0) { throw "flutter build 失败" }
+
+      - name: 打包产物
+        shell: pwsh
+        run: |
+          $rel = "flutter\build\windows\x64\runner\Release"
+          if (-not (Test-Path "$rel\rustdesk.exe")) { throw "未生成 rustdesk.exe" }
+
+          $out = "dist"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "$rel\*" $out -Recurse -Force
+
+          $vd = "target\release\deps\dylib_virtual_display.dll"
+          if (Test-Path $vd) { Copy-Item $vd $out -Force }
+
+          Compress-Archive -Path "$out\*" -DestinationPath "lumendesk-windows.zip" -Force
+          Get-ChildItem "lumendesk-windows.zip" | ForEach-Object {
+            Write-Host "产物大小: $([math]::Round($_.Length/1MB,1)) MB"
+          }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumendesk-windows-${{ github.sha }}
+          path: lumendesk-windows.zip
+          retention-days: 30
