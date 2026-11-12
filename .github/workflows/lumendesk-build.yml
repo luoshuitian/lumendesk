@@ -50,7 +50,8 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           runVcpkgInstall: false
-          doNotCache: false
+          # 关闭自带缓存：它走 Actions 缓存服务，在本仓库的长作业里稳定返回 400/503
+          doNotCache: true
 
       - name: 安装 Rust
         # 与上游 CI 相同的固定版本（v1 的 SHA）
@@ -67,7 +68,8 @@ jobs:
         with:
           flutter-version: 3.24.5
           channel: stable
-          cache: true
+          # 同上：SDK 每次重新下载，换取缓存链路零告警
+          cache: false
 
       - name: 安装绑定生成工具
         shell: pwsh
