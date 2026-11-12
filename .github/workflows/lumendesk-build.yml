@@ -69,17 +69,6 @@ jobs:
           channel: stable
           cache: true
 
-      # 缓存的硬约束：单仓库 Actions 缓存配额只有 10 GB。
-      # 实测此前多份大条目叠加到 9.67 GB，配额打满后保存失败，
-      # 恢复时拿到被驱逐的条目又返回 400——这才是缓存告警的真正成因。
-      # 现在只保留一份 rust-cache（约 2-3 GB），加上 vcpkg installed（约 0.15 GB）
-      # 与 Flutter（约 1.15 GB），总占用约 4 GB，留足余量。
-      - name: 缓存 Rust 构建产物
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v4-rust
-          key: x64-windows-static
-
       - name: 安装绑定生成工具
         shell: pwsh
         env:
@@ -110,11 +99,21 @@ jobs:
         id: vcpkg-cache
         uses: actions/cache@v5
         with:
-          # 只缓存链接阶段真正用到的 installed。buildtrees 是几 GB 的中间产物，
-          # 之前把它一起打包，正是保存失败和后续恢复 400 的主因
-          path: C:\vcpkg\installed
-          key: vcpkg-v3-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
-          restore-keys: vcpkg-v3-
+          # 缓存的是"单个 zip 文件"而不是目录树：目录树几千个小文件，
+          # 打包耗时且容易在缓存服务上失败；单文件更稳、体积也更小
+          path: C:\vcpkg\installed.zip
+          key: vcpkg-zip-v1-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
+          restore-keys: vcpkg-zip-v1-
+
+      - name: 展开缓存的依赖
+        if: steps.vcpkg-cache.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\vcpkg\installed.zip")) { throw "缓存命中但文件缺失" }
+          Expand-Archive -Path "C:\vcpkg\installed.zip" -DestinationPath "C:\vcpkg" -Force
+          Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" |
+            Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
+            Format-Table -AutoSize
 
       - name: 编译原生依赖
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -162,6 +161,11 @@ jobs:
               Write-Host "libyuv 编译器: $($line.Line.Trim())"
             }
           }
+
+          # 打成单文件，供 actions/cache 在作业结束时保存
+          Compress-Archive -Path "C:\vcpkg\installed" -DestinationPath "C:\vcpkg\installed.zip" -Force
+          Get-Item "C:\vcpkg\installed.zip" |
+            ForEach-Object { Write-Host "缓存包大小: $([math]::Round($_.Length/1MB,1)) MB" }
 
       - name: 校验 libyuv 使用 clang-cl 编译
         shell: pwsh
