@@ -58,6 +58,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: x86_64-pc-windows-msvc
+          # flutter_rust_bridge_codegen 生成代码后调用 rustfmt 格式化，
+          # 缺这个组件会直接报 "rustfmt.exe is not installed"
+          components: rustfmt
 
       - name: 安装 Flutter 3.24.5
         uses: subosito/flutter-action@v2
