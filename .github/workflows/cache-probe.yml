@@ -1,0 +1,44 @@
+name: Cache Probe
+
+# 临时诊断用：用一个极小的缓存条目，判断 400/保存失败到底是
+# 缓存服务侧问题，还是我们工作流里的路径/键/体积问题。
+# 诊断结束后可以删除本文件。
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: 缓存探针
+    runs-on: windows-2022
+    timeout-minutes: 10
+
+    steps:
+      - name: 环境信息
+        shell: pwsh
+        run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -match 'CACHE' } |
+            ForEach-Object { Write-Host ("{0}={1}" -f $_.Name, $_.Value) }
+          New-Item -ItemType Directory -Force -Path probe | Out-Null
+          "probe run ${{ github.run_id }}" | Out-File probe\stamp.txt
+          Get-Item probe\stamp.txt | Select-Object Length
+
+      - name: 尝试恢复
+        id: probe-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: probe
+          key: probe-v1-${{ github.sha }}
+          restore-keys: probe-v1-
+
+      - name: 恢复结果
+        shell: pwsh
+        run: Write-Host "cache-hit=${{ steps.probe-restore.outputs.cache-hit }}"
+
+      - name: 尝试保存
+        uses: actions/cache/save@v5
+        with:
+          path: probe
+          key: probe-v1-${{ github.sha }}
