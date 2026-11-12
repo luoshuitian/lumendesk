@@ -2,13 +2,20 @@ name: Build Windows Client
 
 # 说明
 # ----
-# 本文件是 .gitea/workflows/build.yml 的 GitHub Actions 版本。
-# 与 Gitea 版的区别：
-#   1. runs-on 用 GitHub 托管的 windows-2022，自带 MSVC / Windows SDK / LLVM / vcpkg
-#   2. 依赖源码走 GitHub 内网，aom / libyuv / libvpx 能按 vcpkg.json 锁定的版本正常拉取
-#   3. 增加了 vcpkg 依赖的缓存，避免每次重新编译（首次约 40 分钟，命中缓存后约 15 分钟）
+# 与上游 CI（.github/workflows-disabled/flutter-build.yml）对齐的三处关键做法：
+#   1. vcpkg 固定在 vcpkg.json 里声明的 baseline（9e593bb1），避免 runner 自带的
+#      版本与清单不一致导致端口解析失败。
+#   2. 依赖安装用 classic 模式（cwd 切到 C:\vcpkg）。仓库根目录有 vcpkg.json，
+#      在根目录执行 `vcpkg install <包名>` 会进入 manifest 模式，而 manifest 模式
+#      不接受单独指定包名，会直接报错退出——这是上一次 73 秒失败的原因。
+#   3. overlay 端口用仓库自带的 res/vcpkg，而不是外部目录。res/vcpkg 里含
+#      aom / libvpx / libyuv / opus 的上游补丁，缺了这些补丁安装阶段会失败。
 #
-# 上游 RustDesk 自带的 11 个 workflow 已移至 .github/workflows/_upstream_disabled/，
+# 只装 RustDesk 实际链接的 4 个库（libvpx / aom / libyuv / opus），跳过 ffmpeg：
+# libs/scrap/build.rs 里 `// ffmpeg();` 是注释状态，纯软件编码路径不需要它，
+# 可省下约 40 分钟构建时间。
+#
+# 上游自带的 11 个 workflow 已移至 .github/workflows-disabled/，
 # GitHub 只扫描 workflows 顶层目录，因此不会被执行。
 
 on:
@@ -18,6 +25,8 @@ on:
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # 与 vcpkg.json 的 vcpkg-configuration.default-registry.baseline 保持一致
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -30,12 +39,13 @@ jobs:
       - name: 拉取源码
         uses: actions/checkout@v4
 
-      - name: 启用 GitHub Actions 缓存（供 vcpkg 二进制缓存使用）
-        uses: actions/github-script@v7
+      - name: 准备 vcpkg（固定到清单声明的版本）
+        uses: lukka/run-vcpkg@v11
         with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          runVcpkgInstall: false
+          doNotCache: false
 
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,30 +74,53 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
-            ${{ env.VCPKG_INSTALLATION_ROOT }}/buildtrees
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('vcpkg-overlay/**') }}
+            C:\vcpkg\installed
+            C:\vcpkg\buildtrees
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
 
       - name: 编译原生依赖
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          # 只装 RustDesk 实际链接的 4 个库，跳过 ffmpeg（纯软件编码用不到）
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libvpx aom libyuv opus `
+          # classic 模式：切到 vcpkg 目录执行，绕开 manifest 模式不接受包名的限制
+          Push-Location "C:\vcpkg"
+          & "C:\vcpkg\vcpkg.exe" install libvpx aom libyuv opus `
             --triplet x64-windows-static `
-            --overlay-ports="$env:GITHUB_WORKSPACE\vcpkg-overlay" `
-            --x-install-root="$env:VCPKG_INSTALLATION_ROOT\installed"
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install 失败" }
+            --x-install-root="C:\vcpkg\installed" `
+            --overlay-ports="$env:GITHUB_WORKSPACE\res\vcpkg"
+          $code = $LASTEXITCODE
+          Pop-Location
+
+          if ($code -ne 0) {
+            Write-Host "::group::vcpkg 构建日志"
+            Get-ChildItem "C:\vcpkg\buildtrees" -Recurse -Filter "*.log" -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Write-Host "===== $($_.FullName) ====="
+                Get-Content $_.FullName -Tail 40
+              }
+            Write-Host "::endgroup::"
+            throw "vcpkg install 失败（exit $code）"
+          }
+
+          Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" -ErrorAction SilentlyContinue |
+            Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
+            Format-Table -AutoSize
 
       - name: 编译 Rust 核心
         shell: pwsh
         env:
-          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
+          VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
+          # 不用 --locked：Cargo.toml 已恢复上游的 git 依赖（portable-pty 走
+          # rustdesk-org/wezterm），锁文件里的 registry 记录需要据此重新解析
           cargo build --features flutter --lib --release
           if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
           if (-not (Test-Path "target\release\librustdesk.dll")) { throw "未生成 librustdesk.dll" }
+          Get-Item "target\release\librustdesk.dll" |
+            ForEach-Object { Write-Host "librustdesk.dll: $([math]::Round($_.Length/1MB,1)) MB" }
 
       - name: 编译 Flutter UI
         shell: pwsh
@@ -114,6 +147,7 @@ jobs:
           Get-ChildItem "lumendesk-windows.zip" | ForEach-Object {
             Write-Host "产物大小: $([math]::Round($_.Length/1MB,1)) MB"
           }
+          Get-ChildItem $out | Select-Object Name | Format-Table -AutoSize
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
