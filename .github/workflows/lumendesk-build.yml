@@ -76,6 +76,32 @@ jobs:
           key: cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-
 
+      - name: 安装绑定生成工具
+        shell: pwsh
+        env:
+          FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+          CARGO_EXPAND_VERSION: "1.0.95"
+        run: |
+          # 放在原生依赖之前，工具装不上时几分钟内就能暴露，不必等 vcpkg 编完
+          "=== cargo-expand ===" | Tee-Object -FilePath tools-install.log
+          cargo install cargo-expand --version $env:CARGO_EXPAND_VERSION --locked 2>&1 |
+            Tee-Object -FilePath tools-install.log -Append
+          if ($LASTEXITCODE -ne 0) { throw "cargo-expand 安装失败" }
+
+          "=== flutter_rust_bridge_codegen ===" | Tee-Object -FilePath tools-install.log -Append
+          cargo install flutter_rust_bridge_codegen --version $env:FLUTTER_RUST_BRIDGE_VERSION --features uuid --locked 2>&1 |
+            Tee-Object -FilePath tools-install.log -Append
+          if ($LASTEXITCODE -ne 0) { throw "flutter_rust_bridge_codegen 安装失败" }
+
+      - name: 拉取 Dart 依赖
+        shell: pwsh
+        run: |
+          Push-Location flutter
+          flutter pub get 2>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE\pubget.log
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { throw "flutter pub get 失败" }
+
       - name: 缓存 vcpkg 已编译依赖
         id: vcpkg-cache
         uses: actions/cache@v4
@@ -119,27 +145,21 @@ jobs:
         shell: pwsh
         env:
           # codegen 内部走 cargo expand，会构建 scrap 的 build script，
-          # 因此必须能定位到上一步装好的原生库
+          # 因此必须能定位到前面装好的原生库
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
-          FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
-          CARGO_EXPAND_VERSION: "1.0.95"
         run: |
           # src/bridge_generated*.rs 与 flutter/lib/generated_bridge*.dart 都在
           # .gitignore 里，仓库不带这两组文件，必须现场生成
-          cargo install cargo-expand --version $env:CARGO_EXPAND_VERSION --locked
-          cargo install flutter_rust_bridge_codegen --version $env:FLUTTER_RUST_BRIDGE_VERSION --features uuid --locked
-
-          Push-Location flutter
-          flutter pub get
-          Pop-Location
-
-          # 用绝对路径调用，避免 PATH 里 cargo bin 未生效
           $codegen = Join-Path $env:USERPROFILE ".cargo\bin\flutter_rust_bridge_codegen.exe"
           & $codegen `
             --rust-input ./src/flutter_ffi.rs `
-            --dart-output ./flutter/lib/generated_bridge.dart
-          if ($LASTEXITCODE -ne 0) { throw "flutter_rust_bridge_codegen 失败" }
+            --dart-output ./flutter/lib/generated_bridge.dart 2>&1 |
+            Tee-Object -FilePath codegen.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content codegen.log -Tail 60
+            throw "flutter_rust_bridge_codegen 失败"
+          }
 
           $need = @(
             "src\bridge_generated.rs",
@@ -158,7 +178,8 @@ jobs:
               -not (Test-Path $freezed)) {
             Write-Host "缺少 freezed 配套文件，运行 build_runner"
             Push-Location flutter
-            dart run build_runner build --delete-conflicting-outputs
+            dart run build_runner build --delete-conflicting-outputs 2>&1 |
+              Tee-Object -FilePath $env:GITHUB_WORKSPACE\buildrunner.log -Append
             $br = $LASTEXITCODE
             Pop-Location
             if ($br -ne 0) { throw "build_runner 失败" }
@@ -243,9 +264,14 @@ jobs:
           }
           $lines += '```'
           $lines += ""
-          $lines += "## cargo 输出尾部"
+          $lines += "## 各步骤日志尾部"
           $lines += '```'
-          if (Test-Path cargo-build.log) { $lines += Get-Content cargo-build.log -Tail 300 }
+          Get-ChildItem $env:GITHUB_WORKSPACE -Filter "*.log" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $lines += "########## $($_.Name) ##########"
+              $lines += Get-Content $_.FullName -Tail 300
+              $lines += ""
+            }
           $lines += '```'
           $lines += ""
           $lines += "## vcpkg 构建日志尾部"
