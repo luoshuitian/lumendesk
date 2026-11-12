@@ -106,19 +106,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $hit = "false"
-          try {
-            gh release download vcpkg-deps --pattern installed.zip --dir C:\vcpkg --clobber 2>$null
-            if (Test-Path "C:\vcpkg\installed.zip") { $hit = "true" }
-          } catch {
-            Write-Host "没有可用的依赖包，将重新编译"
-          }
-          if ($hit -eq "true") {
+          # 首次运行时 vcpkg-deps 还不存在，gh 会返回非零；这是预期路径，不能让它判失败
+          gh release download vcpkg-deps --pattern installed.zip --dir C:\vcpkg --clobber 2>$null
+          if (Test-Path "C:\vcpkg\installed.zip") {
+            $hit = "true"
             Expand-Archive -Path "C:\vcpkg\installed.zip" -DestinationPath "C:\vcpkg" -Force
             Get-ChildItem "C:\vcpkg\installed\x64-windows-static\lib" |
               Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} |
               Format-Table -AutoSize
+          } else {
+            Write-Host "没有可复用的依赖包，将重新编译"
           }
           "hit=$hit" >> $env:GITHUB_OUTPUT
+          Write-Host "依赖包命中: $hit"
+          # 显式归零，避免把 gh 的非零退出码带成步骤失败
+          exit 0
 
       - name: 编译原生依赖
         if: steps.vcpkg-cache.outputs.hit != 'true'
