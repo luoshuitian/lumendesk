@@ -76,8 +76,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-
+          key: cargo-v2-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-v2-
 
       - name: 安装绑定生成工具
         shell: pwsh
@@ -112,7 +112,7 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\buildtrees
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
+          key: vcpkg-v2-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('res/vcpkg/**') }}
 
       - name: 编译原生依赖
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -242,6 +242,24 @@ jobs:
           name: lumendesk-windows-${{ github.sha }}
           path: lumendesk-windows.zip
           retention-days: 30
+
+      # Artifact 下载要账号鉴权，外部无法直接取；Release 附件在公开仓库可匿名下载，
+      # 这样产物就能被自动取走并交付到本机
+      - name: 发布到 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: LumenDesk Windows 构建 #${{ github.run_number }}
+          body: |
+            自动构建的 Windows 客户端（主控端与被控端为同一程序）。
+
+            - 提交：`${{ github.sha }}`
+            - 运行：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - 内容：`rustdesk.exe` + `librustdesk.dll` + 运行库
+          files: lumendesk-windows.zip
+          prerelease: true
+          draft: false
 
       # 失败时把关键日志写回 ci-logs 分支，便于不带登录态也能定位问题
       - name: 失败时把日志写回仓库
