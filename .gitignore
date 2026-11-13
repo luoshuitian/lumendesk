@@ -60,3 +60,9 @@ flutter/web/
 /third_party/libdrmtap/
 # Local git worktrees
 .worktrees/
+
+# 绿色版真实配置（含服务器地址与公钥），只提交 example 模板
+portable/LumenDesk2.toml
+config/
+# 本地打包产物
+/dist/
