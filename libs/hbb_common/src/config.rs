@@ -3812,3 +3812,24 @@ mod tests {
         assert_ne!(non_service_root, non_service_user);
     }
 }
+
+#[cfg(test)]
+mod portable_path_tests {
+    use super::*;
+
+    // 绿色模式：设置 LUMENDESK_PORTABLE_DIR 后，配置路径必须落在该目录内
+    #[test]
+    fn portable_dir_env_overrides_config_path() {
+        let dir = std::env::temp_dir().join("lumendesk-portable-path-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LUMENDESK_PORTABLE_DIR", &dir);
+        let resolved = Config::path("LumenDesk2.toml");
+        std::env::remove_var("LUMENDESK_PORTABLE_DIR");
+        assert!(
+            resolved.starts_with(&dir),
+            "portable dir not honoured: {:?}",
+            resolved
+        );
+        assert_eq!(resolved.file_name().unwrap(), "LumenDesk2.toml");
+    }
+}
