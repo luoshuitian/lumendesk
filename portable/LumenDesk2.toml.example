@@ -1,0 +1,19 @@
+# LumenDesk 绿色版配置模板
+#
+# 用法：把本文件复制为同目录下的 LumenDesk2.toml，填入真实的服务器地址与公钥。
+# 程序启动时若发现 exe 同级存在 config 目录，会把配置与日志都写入该目录，
+# 不写 AppData、不碰注册表，整个文件夹可直接拷贝到其他机器。
+#
+# 注意：不要提交填好真实值的 LumenDesk2.toml（仓库是公开的）。
+
+rendezvous_server = ""
+nat_type = 0
+serial = 0
+
+[options]
+# 信令/ID 服务器，可写域名或 IP，端口默认 21116
+custom-rendezvous-server = "__SERVER__"
+# hbbs 生成的公钥（id_ed25519.pub 的内容）
+key = "__PUBKEY__"
+# 中继服务器，留空则由 hbbs 下发；显式写出可避免 relay 解析失败
+relay-server = "__SERVER__:21117"

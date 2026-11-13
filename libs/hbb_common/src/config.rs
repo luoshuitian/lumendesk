@@ -113,8 +113,15 @@ const CHARS: &[char] = &[
     'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
 
-pub const RENDEZVOUS_SERVERS: &[&str] = &["119.8.40.166"];
-pub const RS_PUB_KEY: &str = "N4ngxwhZnadVhDEvmHZpQz2z1PmJmKVRK5RFoIURVbk=";
+// 服务器地址与公钥一律不写死在源码里（本仓库是公开的）。
+// 运行时从绿色配置文件读取：
+//   <exe>/config/LumenDesk2.toml
+//     custom-rendezvous-server = "rd.example.com"
+//     key = "<服务端公钥>"
+// 这两项的优先级高于此处常量（见 get_rendezvous_server / get_key）。
+// 留空是有意为之：宁可连不上，也不要静默回落到公共服务器。
+pub const RENDEZVOUS_SERVERS: &[&str] = &[];
+pub const RS_PUB_KEY: &str = "";
 
 pub const RENDEZVOUS_PORT: i32 = 21116;
 pub const RELAY_PORT: i32 = 21117;
@@ -463,6 +470,27 @@ pub struct TransferSerde {
 #[inline]
 pub fn get_online_state() -> i64 {
     *ONLINE.lock().unwrap().values().max().unwrap_or(&0)
+}
+
+/// 绿色模式的根目录：exe 同级的 config 目录。
+///
+/// 存在该目录时，配置、日志、密钥全部落在里面，应用不写 AppData、不改注册表，
+/// 整个程序目录可直接拷贝到其他机器使用。也可用环境变量
+/// `LUMENDESK_PORTABLE_DIR` 显式指定，便于同一台机器跑多套实例。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn portable_root() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("LUMENDESK_PORTABLE_DIR") {
+        let path = PathBuf::from(dir);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("config");
+    if dir.is_dir() {
+        return Some(dir);
+    }
+    None
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -925,6 +953,13 @@ impl Config {
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
+            // 绿色/便携模式：如果 exe 同级存在 config 目录，则所有配置文件与日志都落在
+            // 该目录，不写 AppData、不碰注册表，整个文件夹拷走即可用。
+            // 未放置 config 目录时行为与上游完全一致（回落到系统配置目录）。
+            if let Some(mut root) = portable_root() {
+                root.push(p);
+                return root;
+            }
             #[cfg(not(target_os = "macos"))]
             let org = "".to_owned();
             #[cfg(target_os = "macos")]

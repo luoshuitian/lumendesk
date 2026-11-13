@@ -283,6 +283,25 @@ jobs:
           $vd = "target\release\deps\dylib_virtual_display.dll"
           if (Test-Path $vd) { Copy-Item $vd $out -Force }
 
+          # 绿色版：只要 exe 同级存在 config 目录，程序就把配置与日志写在里面
+          # （见 libs/hbb_common/src/config.rs 的 portable_root）
+          $cfgDir = Join-Path $out "config"
+          New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+          Copy-Item "portable\LumenDesk2.toml.example" (Join-Path $cfgDir "LumenDesk2.toml.example") -Force
+
+          # 仓库里不存真实地址与公钥；如需 CI 直接产出可用包，可在仓库 Secrets 里配置
+          # LUMENDESK_SERVER / LUMENDESK_PUBKEY。未配置时只带占位符模板。
+          $server = "${{ secrets.LUMENDESK_SERVER }}"
+          $pubkey = "${{ secrets.LUMENDESK_PUBKEY }}"
+          if ($server -and $pubkey) {
+            $content = (Get-Content "portable\LumenDesk2.toml.example" -Raw).
+              Replace("__SERVER__", $server).Replace("__PUBKEY__", $pubkey)
+            Set-Content -Path (Join-Path $cfgDir "LumenDesk2.toml") -Value $content -Encoding utf8 -NoNewline
+            Write-Host "已按仓库 Secrets 生成 LumenDesk2.toml"
+          } else {
+            Write-Host "::warning::未配置 LUMENDESK_SERVER / LUMENDESK_PUBKEY，产物仅含占位符模板"
+          }
+
           Compress-Archive -Path "$out\*" -DestinationPath "lumendesk-windows.zip" -Force
           Get-ChildItem "lumendesk-windows.zip" | ForEach-Object {
             Write-Host "产物大小: $([math]::Round($_.Length/1MB,1)) MB"
