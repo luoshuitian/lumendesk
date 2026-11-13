@@ -3830,6 +3830,9 @@ mod portable_path_tests {
             "portable dir not honoured: {:?}",
             resolved
         );
-        assert_eq!(resolved.file_name().unwrap(), "LumenDesk2.toml");
+        assert_eq!(
+            resolved.file_name().unwrap().to_string_lossy(),
+            "LumenDesk2.toml"
+        );
     }
 }
