@@ -11,9 +11,12 @@ nat_type = 0
 serial = 0
 
 [options]
-# 信令/ID 服务器，可写域名或 IP，端口默认 21116
-custom-rendezvous-server = "__SERVER__"
+# 信令/ID 服务器，域名或 IP + 端口。地址里带冒号时，程序不会追加默认端口 21116
+custom-rendezvous-server = "__SERVER__:__RENDEZVOUS_PORT__"
 # hbbs 生成的公钥（id_ed25519.pub 的内容）
 key = "__PUBKEY__"
-# 中继服务器，留空则由 hbbs 下发；显式写出可避免 relay 解析失败
-relay-server = "__SERVER__:21117"
+# 中继服务器（hbbr），显式写出避免解析失败。留空则由 hbbs 通过 -r 下发
+relay-server = "__SERVER__:__RELAY_PORT__"
+# 端口结构（hbbs -p P）：NAT 探测 = P-1，主服务 = P，WebSocket = P+2
+# 端口结构（hbbr -p Q）：主服务 = Q，WebSocket = Q+2
+# 本项目非默认端口：P=29016（29015/29016/29018），Q=29017（29017/29019）
